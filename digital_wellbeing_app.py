@@ -21,12 +21,10 @@ def get_datetime_input(label, default_dt=None, key=None):
     """
     if default_dt is None:
         default_dt = datetime.now()
-    # Split default into date and time
     default_date = default_dt.date()
     default_time = default_dt.time().replace(microsecond=0)
     d = st.date_input(label + " (date)", value=default_date, key=None if key is None else f"{key}_date")
     t = st.time_input(label + " (time)", value=default_time, key=None if key is None else f"{key}_time")
-    # Combine into datetime
     return datetime.combine(d, t)
 
 # ---------- Helper Functions ----------
@@ -70,7 +68,7 @@ with left:
 
     app_name = st.text_input("App / Activity name", value="browser")
     category = st.selectbox("Category", ["Social", "Study", "Productivity", "Entertainment", "Other"])
-    # use compatibility helper instead of st.datetime_input
+    # compatibility datetime inputs
     start_time_dt = get_datetime_input("Start time", default_dt=datetime.now() - timedelta(minutes=5), key="manual_start")
     end_time_dt   = get_datetime_input("End time", default_dt=datetime.now(), key="manual_end")
     notes = st.text_area("Notes (optional)", height=50)
@@ -118,22 +116,23 @@ with mid:
     if df.empty:
         st.info("No sessions recorded yet. Add one to see analytics.")
     else:
-        df["start_dt"] = pd.to_datetime(df["start"])
-        df["end_dt"] = pd.to_datetime(df["end"])
+        # ensure start_dt and end_dt exist and are datetimes
+        df["start_dt"] = pd.to_datetime(df["start"], errors="coerce")
+        df["end_dt"] = pd.to_datetime(df["end"], errors="coerce")
 
         # Filter by date range
-        min_date = df["start_dt"].min().date()
-        max_date = df["end_dt"].max().date()
+        min_date = df["start_dt"].min().date() if not df["start_dt"].isna().all() else datetime.now().date()
+        max_date = df["end_dt"].max().date() if not df["end_dt"].isna().all() else datetime.now().date()
         date_range = st.date_input("Select date range", (min_date, max_date), key="date_range")
 
-        # date_range may be a single date if user selects just one; handle that
-        if isinstance(date_range, tuple) or isinstance(date_range, list):
+        # normalize date_range
+        if isinstance(date_range, (tuple, list)):
             start_filter, end_filter = date_range[0], date_range[1]
         else:
             start_filter = end_filter = date_range
 
         mask = (df["start_dt"].dt.date >= start_filter) & (df["end_dt"].dt.date <= end_filter)
-        view = df.loc[mask]
+        view = df.loc[mask].copy()
 
         total_min = view["duration_min"].sum()
         st.metric("Total Screen Time (mins)", f"{total_min:.1f}")
@@ -147,12 +146,22 @@ with mid:
         st.subheader("Usage by Category")
         st.dataframe(by_cat.reset_index().rename(columns={"duration_min": "Minutes"}), height=150)
 
-        # daily line chart
-        daily = view.copy()
-        daily["date"] = daily["start_dt"].dt.date
-        daily_agg = daily.groupby("date")["duration_min"].sum().reset_index()
-        if not daily_agg.empty:
-            st.line_chart(daily_agg.rename(columns={"date":"index"}).set_index("date"))
+        # ---- robust daily aggregation for chart ----
+        # create daily_agg with guaranteed 'date' column
+        if not view.empty:
+            # group by the date (ensure we use .dt.date to get date objects)
+            daily_series = view.groupby(view["start_dt"].dt.date)["duration_min"].sum()
+            daily_agg = daily_series.rename_axis("date").reset_index()
+        else:
+            daily_agg = pd.DataFrame(columns=["date", "duration_min"])
+
+        if not daily_agg.empty and "date" in daily_agg.columns:
+            # convert date to string for a stable chart index
+            daily_agg["date_str"] = daily_agg["date"].astype(str)
+            daily_agg = daily_agg.set_index("date_str")
+            st.line_chart(daily_agg["duration_min"])
+        else:
+            st.info("No daily data available for charting.")
 
     st.markdown("---")
     st.header("📂 Import / Export Data")
@@ -161,7 +170,6 @@ with mid:
     if uploaded:
         try:
             imp = pd.read_csv(uploaded)
-            # basic validation: check for required columns
             required = {"id","start","end","app","category","duration_min"}
             if not required.issubset(set(imp.columns)):
                 st.error("Imported CSV missing required columns. Required: id, start, end, app, category, duration_min")
@@ -220,7 +228,7 @@ with right:
     df = load_sessions()
     if not df.empty:
         today = datetime.now().date()
-        df["start_dt"] = pd.to_datetime(df["start"])
+        df["start_dt"] = pd.to_datetime(df["start"], errors="coerce")
         today_total = df.loc[df["start_dt"].dt.date == today, "duration_min"].sum()
 
         st.metric("Today's Usage", f"{today_total:.1f} / {daily_limit} mins")
@@ -237,7 +245,6 @@ df = load_sessions()
 if df.empty:
     st.info("No sessions available.")
 else:
-    # show table
     st.dataframe(df.drop(columns=["start_dt", "end_dt"], errors="ignore"), height=300)
 
     delete_id = st.text_input("Enter Session ID to delete")
