@@ -6,12 +6,28 @@ Run:
     streamlit run digital_wellbeing_app.py
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, date, time, timedelta
 import streamlit as st
 import pandas as pd
 import uuid
 
 st.set_page_config(page_title="Digital Wellbeing Tracker", layout="wide")
+
+# ---------- Compatibility helper ----------
+def get_datetime_input(label, default_dt=None, key=None):
+    """
+    Compatible datetime input using date_input + time_input.
+    Use this instead of st.datetime_input for broad Streamlit compatibility.
+    """
+    if default_dt is None:
+        default_dt = datetime.now()
+    # Split default into date and time
+    default_date = default_dt.date()
+    default_time = default_dt.time().replace(microsecond=0)
+    d = st.date_input(label + " (date)", value=default_date, key=None if key is None else f"{key}_date")
+    t = st.time_input(label + " (time)", value=default_time, key=None if key is None else f"{key}_time")
+    # Combine into datetime
+    return datetime.combine(d, t)
 
 # ---------- Helper Functions ----------
 def now_str():
@@ -54,16 +70,17 @@ with left:
 
     app_name = st.text_input("App / Activity name", value="browser")
     category = st.selectbox("Category", ["Social", "Study", "Productivity", "Entertainment", "Other"])
-    start_time = st.datetime_input("Start time", value=datetime.now() - timedelta(minutes=5))
-    end_time = st.datetime_input("End time", value=datetime.now())
+    # use compatibility helper instead of st.datetime_input
+    start_time_dt = get_datetime_input("Start time", default_dt=datetime.now() - timedelta(minutes=5), key="manual_start")
+    end_time_dt   = get_datetime_input("End time", default_dt=datetime.now(), key="manual_end")
     notes = st.text_area("Notes (optional)", height=50)
 
     if st.button("Add Session"):
-        if end_time <= start_time:
+        if end_time_dt <= start_time_dt:
             st.error("❌ End time must be after start time.")
         else:
-            add_session(start_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        end_time.strftime("%Y-%m-%d %H:%M:%S"),
+            add_session(start_time_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        end_time_dt.strftime("%Y-%m-%d %H:%M:%S"),
                         app_name, category, notes)
             st.success("✅ Session added successfully!")
 
@@ -73,8 +90,8 @@ with left:
     if "live_running" not in st.session_state:
         st.session_state.live_running = False
 
-    live_app = st.text_input("Current activity", value="Reading")
-    live_cat = st.selectbox("Category", ["Study", "Productivity", "Social", "Entertainment", "Other"], key="live_cat")
+    live_app = st.text_input("Current activity", value="Reading", key="live_app")
+    live_cat = st.selectbox("Category (live)", ["Study", "Productivity", "Social", "Entertainment", "Other"], key="live_cat")
 
     if st.session_state.live_running:
         if st.button("Stop Live Session"):
@@ -107,9 +124,15 @@ with mid:
         # Filter by date range
         min_date = df["start_dt"].min().date()
         max_date = df["end_dt"].max().date()
-        date_range = st.date_input("Select date range", (min_date, max_date))
+        date_range = st.date_input("Select date range", (min_date, max_date), key="date_range")
 
-        mask = (df["start_dt"].dt.date >= date_range[0]) & (df["end_dt"].dt.date <= date_range[1])
+        # date_range may be a single date if user selects just one; handle that
+        if isinstance(date_range, tuple) or isinstance(date_range, list):
+            start_filter, end_filter = date_range[0], date_range[1]
+        else:
+            start_filter = end_filter = date_range
+
+        mask = (df["start_dt"].dt.date >= start_filter) & (df["end_dt"].dt.date <= end_filter)
         view = df.loc[mask]
 
         total_min = view["duration_min"].sum()
@@ -124,7 +147,12 @@ with mid:
         st.subheader("Usage by Category")
         st.dataframe(by_cat.reset_index().rename(columns={"duration_min": "Minutes"}), height=150)
 
-        st.line_chart(view.groupby(view["start_dt"].dt.date)["duration_min"].sum())
+        # daily line chart
+        daily = view.copy()
+        daily["date"] = daily["start_dt"].dt.date
+        daily_agg = daily.groupby("date")["duration_min"].sum().reset_index()
+        if not daily_agg.empty:
+            st.line_chart(daily_agg.rename(columns={"date":"index"}).set_index("date"))
 
     st.markdown("---")
     st.header("📂 Import / Export Data")
@@ -133,8 +161,14 @@ with mid:
     if uploaded:
         try:
             imp = pd.read_csv(uploaded)
-            save_sessions(pd.concat([load_sessions(), imp], ignore_index=True))
-            st.success("✅ Data imported successfully.")
+            # basic validation: check for required columns
+            required = {"id","start","end","app","category","duration_min"}
+            if not required.issubset(set(imp.columns)):
+                st.error("Imported CSV missing required columns. Required: id, start, end, app, category, duration_min")
+            else:
+                df_all = pd.concat([load_sessions(), imp], ignore_index=True).drop_duplicates(subset=["id"])
+                save_sessions(df_all)
+                st.success("✅ Data imported successfully.")
         except Exception as e:
             st.error(f"Import failed: {e}")
 
@@ -180,8 +214,8 @@ with right:
     if "daily_limit" not in st.session_state:
         st.session_state.daily_limit = 240  # default 4 hours
 
-    daily_limit = st.number_input("Set Daily Limit (minutes)", 30, 1440, st.session_state.daily_limit)
-    st.session_state.daily_limit = daily_limit
+    daily_limit = st.number_input("Set Daily Limit (minutes)", 30, 1440, int(st.session_state.daily_limit))
+    st.session_state.daily_limit = int(daily_limit)
 
     df = load_sessions()
     if not df.empty:
@@ -203,6 +237,7 @@ df = load_sessions()
 if df.empty:
     st.info("No sessions available.")
 else:
+    # show table
     st.dataframe(df.drop(columns=["start_dt", "end_dt"], errors="ignore"), height=300)
 
     delete_id = st.text_input("Enter Session ID to delete")
